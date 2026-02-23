@@ -34,7 +34,7 @@ class PaperExecutorTests(unittest.TestCase):
             size=10,
             tif=TimeInForce.GTC,
             post_only=True,
-            engine="engine_1h_maker",
+            engine="engine_pair_arb",
             expected_edge=0.01,
         )
         open_result = executor.place_order(intent, books)

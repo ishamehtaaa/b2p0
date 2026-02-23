@@ -4,8 +4,13 @@ import json
 import os
 import ssl
 from functools import lru_cache
+from typing import Any, TypeAlias
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+JsonValue: TypeAlias = (
+    dict[str, Any] | list[Any] | str | int | float | bool | None
+)
 
 
 def _resolve_ca_bundle() -> tuple[str | None, str | None]:
@@ -53,7 +58,9 @@ def websocket_sslopt() -> dict[str, object]:
     return sslopt
 
 
-def get_json(url: str, params: dict[str, str] | None = None, timeout: float = 10.0):
+def get_json(
+    url: str, params: dict[str, str] | None = None, timeout: float = 10.0
+) -> JsonValue:
     if params:
         query = urlencode(params)
         separator = "&" if "?" in url else "?"
@@ -64,4 +71,7 @@ def get_json(url: str, params: dict[str, str] | None = None, timeout: float = 10
     request = Request(full_url, headers={"User-Agent": "polymarket-bot/0.1"})
     with urlopen(request, timeout=timeout, context=_ssl_context()) as response:
         body = response.read().decode("utf-8")
-    return json.loads(body)
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Invalid JSON response from {full_url}") from exc

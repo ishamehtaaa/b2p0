@@ -58,6 +58,20 @@ class ClobStreamTests(unittest.TestCase):
         self.assertAlmostEqual(book.bids[0].price, 0.41)
         self.assertEqual(len(book.asks), 0)
 
+    def test_camel_case_payload_is_ignored(self) -> None:
+        stream = ClobMarketStream("wss://example.com/ws/market")
+        stream.process_payload(
+            {
+                "eventType": "book",
+                "assetId": "tok-ignored",
+                "bids": [{"price": "0.42", "size": "10"}],
+                "asks": [{"price": "0.58", "size": "10"}],
+                "timestamp": "1234",
+            }
+        )
+        books = stream.get_books(["tok-ignored"])
+        self.assertEqual(books, {})
+
 
 if __name__ == "__main__":
     unittest.main()

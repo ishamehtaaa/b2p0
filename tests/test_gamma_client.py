@@ -32,6 +32,7 @@ class GammaClientTests(unittest.TestCase):
             "question": "Bitcoin Up or Down - February 17, 11:40PM-11:45PM ET",
             "startDate": (now - timedelta(hours=1)).isoformat(),
             "endDate": (now + timedelta(minutes=8)).isoformat(),
+            "conditionId": "0x" + ("11" * 32),
             "clobTokenIds": '["tok-up","tok-down"]',
             "outcomes": ["Up", "Down"],
             "liquidityNum": "1000",
@@ -53,6 +54,7 @@ class GammaClientTests(unittest.TestCase):
             "question": "Bitcoin Up or Down - February 17, 11:35PM-11:40PM ET",
             "startDate": (now - timedelta(hours=2)).isoformat(),
             "endDate": (now + timedelta(minutes=2)).isoformat(),
+            "conditionId": "0x" + ("22" * 32),
             "clobTokenIds": '["tok-up","tok-down"]',
             "outcomes": ["Up", "Down"],
             "liquidityNum": "1000",
@@ -78,6 +80,7 @@ class GammaClientTests(unittest.TestCase):
             "question": "Bitcoin Up or Down - test",
             "startDate": (now - timedelta(hours=1)).isoformat(),
             "endDate": (now + timedelta(minutes=4)).isoformat(),
+            "conditionId": "0x" + ("33" * 32),
             "clobTokenIds": '["tok-up","tok-down"]',
             "outcomes": ["Up", "Down"],
             "liquidityNum": "1000",
@@ -93,6 +96,22 @@ class GammaClientTests(unittest.TestCase):
         markets = client.fetch_btc_markets([102892], limit_per_tag=5)
         self.assertEqual(len(markets), 1)
         self.assertTrue(markets[0].is_neg_risk)
+
+    def test_does_not_fallback_to_title_key(self) -> None:
+        now = datetime.now(tz=timezone.utc)
+        item = {
+            "id": "m-title-only",
+            "title": "Bitcoin Up or Down - test",
+            "startDate": (now - timedelta(hours=1)).isoformat(),
+            "endDate": (now + timedelta(minutes=4)).isoformat(),
+            "conditionId": "0x" + ("11" * 32),
+            "clobTokenIds": '["tok-up","tok-down"]',
+            "outcomes": ["Up", "Down"],
+            "slug": "btc-title-only-test",
+        }
+        client = FakeGammaClient({102892: [item]})
+        markets = client.fetch_btc_markets([102892], limit_per_tag=5)
+        self.assertEqual(markets, [])
 
 
 if __name__ == "__main__":

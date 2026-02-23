@@ -1,15 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 import logging
 import os
 import time
-from typing import Any
 import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, TypedDict, cast
 
 from polymarket_bot.config import BotConfig
-from polymarket_bot.models import OrderBookSnapshot, OrderIntent, OrderResult, Side, TimeInForce
+from polymarket_bot.models import (
+    OrderBookSnapshot,
+    OrderIntent,
+    OrderResult,
+    Side,
+    TimeInForce,
+)
 from polymarket_bot.pricing import per_share_fee
 
 LOGGER = logging.getLogger("polymarket_bot")
@@ -33,7 +39,11 @@ CONDITIONAL_TOKENS_ABI: list[dict[str, Any]] = [
     {
         "inputs": [
             {"internalType": "address", "name": "collateralToken", "type": "address"},
-            {"internalType": "bytes32", "name": "parentCollectionId", "type": "bytes32"},
+            {
+                "internalType": "bytes32",
+                "name": "parentCollectionId",
+                "type": "bytes32",
+            },
             {"internalType": "bytes32", "name": "conditionId", "type": "bytes32"},
             {"internalType": "uint256[]", "name": "partition", "type": "uint256[]"},
             {"internalType": "uint256", "name": "amount", "type": "uint256"},
@@ -46,7 +56,11 @@ CONDITIONAL_TOKENS_ABI: list[dict[str, Any]] = [
     {
         "inputs": [
             {"internalType": "address", "name": "collateralToken", "type": "address"},
-            {"internalType": "bytes32", "name": "parentCollectionId", "type": "bytes32"},
+            {
+                "internalType": "bytes32",
+                "name": "parentCollectionId",
+                "type": "bytes32",
+            },
             {"internalType": "bytes32", "name": "conditionId", "type": "bytes32"},
             {"internalType": "uint256[]", "name": "indexSets", "type": "uint256[]"},
         ],
@@ -67,7 +81,11 @@ PROXY_FACTORY_ABI: list[dict[str, Any]] = [
                         "name": "typeCode",
                         "type": "uint8",
                     },
-                    {"internalType": "address payable", "name": "to", "type": "address"},
+                    {
+                        "internalType": "address payable",
+                        "name": "to",
+                        "type": "address",
+                    },
                     {"internalType": "uint256", "name": "value", "type": "uint256"},
                     {"internalType": "bytes", "name": "data", "type": "bytes"},
                 ],
@@ -77,7 +95,9 @@ PROXY_FACTORY_ABI: list[dict[str, Any]] = [
             }
         ],
         "name": "proxy",
-        "outputs": [{"internalType": "bytes[]", "name": "returnValues", "type": "bytes[]"}],
+        "outputs": [
+            {"internalType": "bytes[]", "name": "returnValues", "type": "bytes[]"}
+        ],
         "stateMutability": "payable",
         "type": "function",
     }
@@ -107,11 +127,77 @@ class SettlementResult:
         return self.status == "unsupported"
 
 
-class BaseExecutor:
-    def preflight(self) -> None:
-        return
+@dataclass(frozen=True)
+class ParsedFill:
+    filled_size: float
+    filled_price: float
+    fee_paid: float
 
-    def place_order(self, intent: OrderIntent, books: dict[str, OrderBookSnapshot]) -> OrderResult:
+
+class ClobOrderPayload(TypedDict, total=False):
+    id: str
+    orderID: str
+    status: str
+    filledSize: str | int | float
+    filledPrice: str | int | float
+    avgPrice: str | int | float
+    fee: str | int | float
+
+
+class PendingMergePayload(TypedDict):
+    tx_hash: str
+    market_id: str
+    condition_id: str
+    is_neg_risk: bool
+    route: str
+    target: str
+    merged_size: float
+
+
+class PendingRedeemPayload(TypedDict):
+    tx_hash: str
+    condition_id: str
+    route: str
+    target: str
+
+
+class BalanceAllowancePayload(TypedDict, total=False):
+    balance: str | int | float
+    allowances: dict[str, str | int | float]
+
+
+class MakerOrderPayload(TypedDict, total=False):
+    order_id: str
+    maker_address: str
+    matched_amount: str | int | float
+    price: str | int | float
+    fee_rate_bps: str | int | float
+    asset_id: str
+    side: str
+
+
+class TradePayload(TypedDict, total=False):
+    id: str
+    match_time: str | int | float
+    maker_orders: list[MakerOrderPayload]
+
+
+@dataclass(frozen=True)
+class MakerTradeFill:
+    trade_id: str
+    order_id: str
+    token_id: str
+    side: Side
+    size: float
+    price: float
+    fee_rate_bps: int
+    match_time: int
+
+
+class BaseExecutor:
+    def place_order(
+        self, intent: OrderIntent, books: dict[str, OrderBookSnapshot]
+    ) -> OrderResult:
         raise NotImplementedError
 
     def cancel_order(self, order_id: str) -> bool:
@@ -120,10 +206,34 @@ class BaseExecutor:
     def cancel_all(self) -> None:
         raise NotImplementedError
 
-    def sweep(self, books: dict[str, OrderBookSnapshot]) -> list[tuple[OrderIntent, OrderResult]]:
+    def sweep(
+        self, books: dict[str, OrderBookSnapshot]
+    ) -> list[tuple[OrderIntent, OrderResult]]:
         return []
 
-    def register_condition(self, *, condition_id: str, is_neg_risk: bool, market_end_ts: float | None = None) -> None:
+    def get_order_result(
+        self, order_id: str, intent: OrderIntent
+    ) -> OrderResult | None:
+        return None
+
+    def get_collateral_balance(self) -> float | None:
+        return None
+
+    def get_token_balance(self, token_id: str) -> float | None:
+        del token_id
+        return None
+
+    def get_recent_maker_trade_fills(self, *, after_ts: int) -> list[MakerTradeFill]:
+        del after_ts
+        return []
+
+    def register_condition(
+        self,
+        *,
+        condition_id: str,
+        is_neg_risk: bool,
+        market_end_ts: float | None = None,
+    ) -> None:
         return
 
     def merge_pairs(
@@ -136,10 +246,14 @@ class BaseExecutor:
         condition_id: str | None = None,
         is_neg_risk: bool | None = None,
     ) -> SettlementResult:
-        return SettlementResult(status="unsupported", raw={"reason": "merge not supported"})
+        return SettlementResult(
+            status="unsupported", raw={"reason": "merge not supported"}
+        )
 
     def redeem_all(self) -> SettlementResult:
-        return SettlementResult(status="unsupported", raw={"reason": "redeem not supported"})
+        return SettlementResult(
+            status="unsupported", raw={"reason": "redeem not supported"}
+        )
 
 
 class PaperExecutor(BaseExecutor):
@@ -147,7 +261,9 @@ class PaperExecutor(BaseExecutor):
         self.config = config
         self.open_orders: dict[str, OpenPaperOrder] = {}
 
-    def place_order(self, intent: OrderIntent, books: dict[str, OrderBookSnapshot]) -> OrderResult:
+    def place_order(
+        self, intent: OrderIntent, books: dict[str, OrderBookSnapshot]
+    ) -> OrderResult:
         now = datetime.now(tz=timezone.utc)
         order_id = f"paper-{uuid.uuid4().hex[:12]}"
         book = books.get(intent.token_id)
@@ -186,7 +302,9 @@ class PaperExecutor(BaseExecutor):
             )
 
         if intent.post_only:
-            self.open_orders[order_id] = OpenPaperOrder(order_id=order_id, intent=intent, created_at=now)
+            self.open_orders[order_id] = OpenPaperOrder(
+                order_id=order_id, intent=intent, created_at=now
+            )
             return OrderResult(
                 order_id=order_id,
                 market_id=intent.market_id,
@@ -257,7 +375,9 @@ class PaperExecutor(BaseExecutor):
             raw={},
         )
 
-    def sweep(self, books: dict[str, OrderBookSnapshot]) -> list[tuple[OrderIntent, OrderResult]]:
+    def sweep(
+        self, books: dict[str, OrderBookSnapshot]
+    ) -> list[tuple[OrderIntent, OrderResult]]:
         now = datetime.now(tz=timezone.utc)
         fills: list[tuple[OrderIntent, OrderResult]] = []
         closed: list[str] = []
@@ -293,6 +413,29 @@ class PaperExecutor(BaseExecutor):
             self.open_orders.pop(order_id, None)
         return fills
 
+    def get_order_result(
+        self, order_id: str, intent: OrderIntent
+    ) -> OrderResult | None:
+        open_order = self.open_orders.get(order_id)
+        if open_order is None:
+            return None
+        now = datetime.now(tz=timezone.utc)
+        return OrderResult(
+            order_id=order_id,
+            market_id=open_order.intent.market_id,
+            token_id=open_order.intent.token_id,
+            side=open_order.intent.side,
+            price=open_order.intent.price,
+            size=open_order.intent.size,
+            status="open",
+            filled_size=0.0,
+            filled_price=0.0,
+            fee_paid=0.0,
+            engine=open_order.intent.engine,
+            created_at=now,
+            raw={"paper_open": True},
+        )
+
     def cancel_order(self, order_id: str) -> bool:
         return self.open_orders.pop(order_id, None) is not None
 
@@ -326,17 +469,33 @@ class PaperExecutor(BaseExecutor):
 
     @staticmethod
     def _would_cross(intent: OrderIntent, book: OrderBookSnapshot) -> bool:
-        if intent.side == Side.BUY and book.best_ask > 0 and intent.price >= book.best_ask:
+        if (
+            intent.side == Side.BUY
+            and book.best_ask > 0
+            and intent.price >= book.best_ask
+        ):
             return True
-        if intent.side == Side.SELL and book.best_bid > 0 and intent.price <= book.best_bid:
+        if (
+            intent.side == Side.SELL
+            and book.best_bid > 0
+            and intent.price <= book.best_bid
+        ):
             return True
         return False
 
     @staticmethod
     def _is_fillable(intent: OrderIntent, book: OrderBookSnapshot) -> bool:
-        if intent.side == Side.BUY and book.best_ask > 0 and book.best_ask <= intent.price:
+        if (
+            intent.side == Side.BUY
+            and book.best_ask > 0
+            and book.best_ask <= intent.price
+        ):
             return True
-        if intent.side == Side.SELL and book.best_bid > 0 and book.best_bid >= intent.price:
+        if (
+            intent.side == Side.SELL
+            and book.best_bid > 0
+            and book.best_bid >= intent.price
+        ):
             return True
         return False
 
@@ -351,8 +510,8 @@ class LiveExecutor(BaseExecutor):
         self._funder_address = ""
         self._signature_type = -1
         self._w3 = None
-        self._pending_merges: dict[str, dict[str, Any]] = {}
-        self._pending_redeems: dict[str, dict[str, Any]] = {}
+        self._pending_merges: dict[str, PendingMergePayload] = {}
+        self._pending_redeems: dict[str, PendingRedeemPayload] = {}
         self._known_conditions: dict[str, tuple[bool, float]] = {}
         self._redeem_cursor = 0
 
@@ -415,116 +574,93 @@ class LiveExecutor(BaseExecutor):
         return cls._is_invalid_signature_text(" ".join(parts))
 
     @staticmethod
-    def _derive_api_creds_with_retry(client: Any, attempts: int = 4) -> dict[str, Any] | None:
-        last_exc: Exception | None = None
-        for attempt in range(max(1, attempts)):
-            try:
-                return client.create_or_derive_api_creds()
-            except Exception as exc:  # pragma: no cover - live path
-                last_exc = exc
-                if attempt + 1 < attempts:
-                    time.sleep(0.4 * (attempt + 1))
-        if last_exc is not None:
-            raise last_exc
-        return None
+    def _derive_api_creds(client: Any) -> dict[str, Any] | None:
+        return client.create_or_derive_api_creds()
 
     @staticmethod
-    def _as_float(value: Any) -> float:
-        try:
-            if value is None or value == "":
-                return 0.0
-            return float(value)
-        except Exception:
-            return 0.0
-
-    @classmethod
-    def _pick_ci(cls, payload: dict[str, Any] | None, *keys: str) -> Any:
+    def _ensure_payload_object(payload: Any, *, context: str) -> ClobOrderPayload:
         if not isinstance(payload, dict):
-            return None
-        lowered = {str(k).lower(): v for k, v in payload.items()}
-        for key in keys:
-            lk = key.lower()
-            if lk in lowered:
-                return lowered[lk]
-        for nested_key in ("order", "data", "result"):
-            nested = lowered.get(nested_key)
-            if isinstance(nested, dict):
-                found = cls._pick_ci(nested, *keys)
-                if found is not None:
-                    return found
-        return None
+            raise RuntimeError(f"{context} payload must be a JSON object")
+        return cast(ClobOrderPayload, payload)
+
+    @staticmethod
+    def _parse_number(value: Any, *, field: str, context: str) -> float:
+        if value is None:
+            return 0.0
+        if isinstance(value, bool):
+            raise RuntimeError(f"{context}.{field} cannot be boolean")
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return 0.0
+            try:
+                return float(text)
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"{context}.{field} must be numeric, got {value!r}"
+                ) from exc
+        raise RuntimeError(
+            f"{context}.{field} has unsupported type {type(value).__name__}"
+        )
 
     @classmethod
-    def _extract_status(cls, payload: dict[str, Any] | None, default: str = "accepted") -> str:
-        raw = cls._pick_ci(payload, "status", "state", "orderStatus", "order_status")
+    def _parse_status(cls, payload: ClobOrderPayload, *, default: str) -> str:
+        raw = payload.get("status")
         if raw is None:
             return default
-        return str(raw).lower()
+        if not isinstance(raw, str):
+            raise RuntimeError(f"order payload status must be string, got {type(raw).__name__}")
+        text = raw.strip().lower()
+        return text if text else default
 
     @classmethod
-    def _extract_order_id(cls, payload: dict[str, Any] | None) -> str:
-        raw = cls._pick_ci(payload, "orderID", "orderId", "id")
+    def _parse_order_id(cls, payload: ClobOrderPayload) -> str:
+        raw = payload.get("orderID")
         if raw is None:
-            return uuid.uuid4().hex
-        return str(raw)
+            raw = payload.get("id")
+        if raw is None:
+            raise RuntimeError("post_order response missing order id")
+        order_id = str(raw).strip()
+        if not order_id:
+            raise RuntimeError("post_order response has empty order id")
+        return order_id
 
     @classmethod
-    def _extract_fill_fields(
-        cls,
-        *,
-        payload: dict[str, Any] | None,
-        fallback_size: float,
-        fallback_price: float,
-    ) -> tuple[float, float, float]:
-        filled_size = cls._as_float(
-            cls._pick_ci(
-                payload,
-                "filledSize",
-                "filled_size",
-                "matchedSize",
-                "matched_size",
-                "sizeMatched",
-                "size_matched",
-                "executedSize",
-                "executed_size",
-                "filledAmount",
-                "filled_amount",
-            )
+    def _parse_fill(cls, payload: ClobOrderPayload, *, context: str) -> ParsedFill:
+        filled_size = cls._parse_number(
+            payload.get("filledSize"), field="filledSize", context=context
         )
-        if filled_size <= 0:
-            total_size = cls._as_float(cls._pick_ci(payload, "size", "originalSize", "original_size"))
-            remaining = cls._as_float(
-                cls._pick_ci(payload, "remainingSize", "remaining_size", "sizeRemaining", "size_remaining")
-            )
-            if total_size > 0 and remaining >= 0:
-                filled_size = max(0.0, total_size - remaining)
-
-        filled_price = cls._as_float(
-            cls._pick_ci(
-                payload,
-                "filledPrice",
-                "filled_price",
-                "avgPrice",
-                "avg_price",
-                "averagePrice",
-                "average_price",
-            )
+        # Prefer avgPrice from CLOB order state; use filledPrice only when explicitly provided.
+        filled_price = cls._parse_number(
+            payload.get("avgPrice"), field="avgPrice", context=context
         )
-        fee_paid = cls._as_float(cls._pick_ci(payload, "fee", "feePaid", "fee_paid"))
-
-        status = cls._extract_status(payload, default="")
-        if filled_size <= 0 and status in {"filled", "matched", "executed", "completed", "complete"}:
-            filled_size = fallback_size
-        if filled_size > 0 and filled_price <= 0:
-            filled_price = fallback_price
-        return filled_size, filled_price, fee_paid
+        if filled_price <= 0 and ("filledPrice" in payload):
+            filled_price = cls._parse_number(
+                payload.get("filledPrice"), field="filledPrice", context=context
+            )
+        fee_paid = cls._parse_number(payload.get("fee"), field="fee", context=context)
+        if filled_size < 0:
+            raise RuntimeError(f"{context}.filledSize cannot be negative")
+        if filled_price < 0:
+            raise RuntimeError(f"{context}.avgPrice/filledPrice cannot be negative")
+        return ParsedFill(
+            filled_size=filled_size,
+            filled_price=filled_price,
+            fee_paid=fee_paid,
+        )
 
     def _infer_signature_type(self, signer_address: str, funder_address: str) -> int:
         if self.config.poly_signature_type is not None:
             return int(self.config.poly_signature_type)
-        if self._normalize_address(funder_address) != self._normalize_address(signer_address):
-            # Polymarket proxy wallet / safe style flow.
-            return 2
+        if self._normalize_address(funder_address) != self._normalize_address(
+            signer_address
+        ):
+            # Default contract-wallet flow to Polymarket proxy signatures.
+            # Gnosis safe signatures should be explicitly overridden via
+            # POLY_SIGNATURE_TYPE=2 when needed.
+            return 1
         # EOA wallet.
         return 0
 
@@ -568,9 +704,11 @@ class LiveExecutor(BaseExecutor):
             self._funder_address,
             self._signature_type,
         )
-        if hasattr(self.client, "create_or_derive_api_creds") and hasattr(self.client, "set_api_creds"):
+        if hasattr(self.client, "create_or_derive_api_creds") and hasattr(
+            self.client, "set_api_creds"
+        ):
             try:
-                creds = self._derive_api_creds_with_retry(self.client)
+                creds = self._derive_api_creds(self.client)
             except Exception as exc:
                 payload = self._exception_payload(exc)
                 creds = self._api_creds_from_env()
@@ -580,7 +718,9 @@ class LiveExecutor(BaseExecutor):
                         f"signer={self._signer_address} funder={self._funder_address} signature_type={self._signature_type} "
                         f"error={payload}"
                     ) from exc
-                LOGGER.warning("Using CLOB API creds from environment fallback after derive failure")
+                LOGGER.warning(
+                    "Using CLOB API creds from environment fallback after derive failure"
+                )
             if creds is None:
                 creds = self._api_creds_from_env()
                 if creds is None:
@@ -591,211 +731,400 @@ class LiveExecutor(BaseExecutor):
                 LOGGER.warning("Using CLOB API creds from environment fallback")
             self.client.set_api_creds(creds)
 
-    def _reinitialize_client_for_signature(self, signature_type: int) -> None:
-        if not self.config.poly_private_key:
-            raise RuntimeError("Missing POLY_PRIVATE_KEY for live mode")
-        try:
-            from py_clob_client.client import ClobClient as PyClobClient  # type: ignore
-        except Exception as exc:  # pragma: no cover - runtime dependency path
-            raise RuntimeError(
-                "py-clob-client is required for live mode. Install it with `pip install py-clob-client`."
-            ) from exc
-        if not self._signer_address:
-            try:
-                from eth_account import Account  # type: ignore
-            except Exception as exc:  # pragma: no cover - runtime dependency path
-                raise RuntimeError(
-                    "eth-account is required for live mode. Install it with `pip install eth-account`."
-                ) from exc
-            self._signer_address = Account.from_key(self.config.poly_private_key).address
-        if not self._funder_address:
-            self._funder_address = self.config.poly_proxy_address.strip() or self._signer_address
-
-        self.client = PyClobClient(
-            host=self.config.clob_url,
-            key=self.config.poly_private_key,
-            chain_id=self.config.poly_chain_id,
-            signature_type=int(signature_type),
-            funder=self._funder_address,
-        )
-        if hasattr(self.client, "create_or_derive_api_creds") and hasattr(self.client, "set_api_creds"):
-            try:
-                creds = self._derive_api_creds_with_retry(self.client)
-            except Exception:
-                creds = self._api_creds_from_env()
-                if creds is None:
-                    raise
-                LOGGER.warning("Using CLOB API creds from environment fallback after derive failure")
-            if creds is None:
-                creds = self._api_creds_from_env()
-                if creds is None:
-                    raise RuntimeError("Unable to derive Polymarket API credentials from wallet key")
-                LOGGER.warning("Using CLOB API creds from environment fallback")
-            self.client.set_api_creds(creds)
-
-        self._signature_type = int(signature_type)
-        self._preflight_done = False
-        LOGGER.warning(
-            "live_auth_retry signer=%s funder=%s signature_type=%s",
-            self._signer_address,
-            self._funder_address,
-            self._signature_type,
-        )
-        self.preflight()
-
     def preflight(self) -> None:
         self._bootstrap_client()
         if self._preflight_done:
             return
-        last_exc: Exception | None = None
-        for attempt in range(3):
-            try:
-                self.client.get_api_keys()
-                self._preflight_done = True
-                return
-            except Exception as exc:  # pragma: no cover - live path
-                last_exc = exc
-                if attempt < 2:
-                    time.sleep(0.6 * (attempt + 1))
-        if last_exc is not None:
-            payload = self._exception_payload(last_exc)
+        try:
+            self.client.get_api_keys()
+            self._preflight_done = True
+        except Exception as exc:  # pragma: no cover - live path
+            payload = self._exception_payload(exc)
             raise RuntimeError(
-                "Live auth preflight failed. "
+                "Live auth preflight failed (no retries). "
                 "Check POLY_PRIVATE_KEY/POLY_PROXY_ADDRESS or set CLOB API creds env vars. "
                 f"signer={self._signer_address} funder={self._funder_address} signature_type={self._signature_type} "
                 f"error={payload}"
-            ) from last_exc
+            ) from exc
+
+    def _require_preflight(self) -> None:
+        self._bootstrap_client()
+        if self._preflight_done:
+            return
+        raise RuntimeError(
+            "Live executor not authenticated. Run preflight() once at startup before trading."
+        )
+
+    @classmethod
+    def _parse_balance_allowance(
+        cls, payload: object, *, context: str
+    ) -> float:
+        data = cls._ensure_payload_object(payload, context=context)
+        if "balance" not in data:
+            raise RuntimeError(f"{context} payload missing balance")
+        raw_balance = data.get("balance")
+        value = cls._parse_number(raw_balance, field="balance", context=context)
+        value = cls._normalize_balance_units(raw_balance, value)
+        if value < 0:
+            raise RuntimeError(f"{context}.balance cannot be negative")
+        return value
+
+    @staticmethod
+    def _normalize_balance_units(raw_value: object, parsed_value: float) -> float:
+        if parsed_value <= 0:
+            return 0.0
+        if isinstance(raw_value, str):
+            text = raw_value.strip()
+            if not text:
+                return 0.0
+            lowered = text.lower()
+            if "." in text or "e" in lowered:
+                return parsed_value
+            # CLOB balance_allowance integer balances are 6-decimal base units.
+            return parsed_value / 1_000_000.0
+        if isinstance(raw_value, int):
+            # CLOB balance_allowance integer balances are 6-decimal base units.
+            return parsed_value / 1_000_000.0
+        return parsed_value
+
+    def get_collateral_balance(self) -> float:
+        self._require_preflight()
+        try:
+            from py_clob_client.clob_types import (  # type: ignore
+                AssetType,
+                BalanceAllowanceParams,
+            )
+        except Exception as exc:  # pragma: no cover - runtime dependency path
+            raise RuntimeError(
+                "py-clob-client clob_types unavailable for balance allowance call"
+            ) from exc
+
+        try:
+            payload = self.client.get_balance_allowance(  # type: ignore[union-attr]
+                BalanceAllowanceParams(
+                    asset_type=AssetType.COLLATERAL,
+                    signature_type=self._signature_type,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - live path
+            raise RuntimeError(
+                f"get_balance_allowance collateral failed: {self._exception_payload(exc)}"
+            ) from exc
+        return self._parse_balance_allowance(
+            payload, context="get_balance_allowance.collateral"
+        )
+
+    def get_token_balance(self, token_id: str) -> float:
+        self._require_preflight()
+        cleaned_token_id = str(token_id or "").strip()
+        if not cleaned_token_id:
+            raise RuntimeError("token_id is required for token balance call")
+        try:
+            from py_clob_client.clob_types import (  # type: ignore
+                AssetType,
+                BalanceAllowanceParams,
+            )
+        except Exception as exc:  # pragma: no cover - runtime dependency path
+            raise RuntimeError(
+                "py-clob-client clob_types unavailable for balance allowance call"
+            ) from exc
+
+        try:
+            payload = self.client.get_balance_allowance(  # type: ignore[union-attr]
+                BalanceAllowanceParams(
+                    asset_type=AssetType.CONDITIONAL,
+                    token_id=cleaned_token_id,
+                    signature_type=self._signature_type,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - live path
+            raise RuntimeError(
+                "get_balance_allowance conditional failed "
+                f"token_id={cleaned_token_id}: {self._exception_payload(exc)}"
+            ) from exc
+        return self._parse_balance_allowance(
+            payload, context="get_balance_allowance.conditional"
+        )
+
+    @staticmethod
+    def _ensure_trade_payload_object(payload: object) -> TradePayload | None:
+        if not isinstance(payload, dict):
+            return None
+        return cast(TradePayload, payload)
+
+    def _parse_maker_trade_fills(
+        self,
+        payload: object,
+        *,
+        after_ts: int,
+    ) -> list[MakerTradeFill]:
+        if not isinstance(payload, list):
+            raise RuntimeError("get_trades response must be a list")
+        wallet_addresses = {
+            self._normalize_address(self._signer_address),
+            self._normalize_address(self._funder_address),
+        }
+        wallet_addresses = {addr for addr in wallet_addresses if addr}
+        fills: list[MakerTradeFill] = []
+        seen: set[tuple[str, str]] = set()
+        min_ts = max(0, int(after_ts))
+        for raw_trade in payload:
+            trade = self._ensure_trade_payload_object(raw_trade)
+            if trade is None:
+                continue
+            trade_id = str(trade.get("id") or "").strip()
+            if not trade_id:
+                continue
+            match_time = int(
+                self._parse_number(
+                    trade.get("match_time"),
+                    field="match_time",
+                    context="trade",
+                )
+            )
+            if match_time < min_ts:
+                continue
+            maker_orders = trade.get("maker_orders")
+            if not isinstance(maker_orders, list):
+                continue
+            for raw_order in maker_orders:
+                if not isinstance(raw_order, dict):
+                    continue
+                maker_address = self._normalize_address(
+                    str(raw_order.get("maker_address") or "")
+                )
+                if maker_address not in wallet_addresses:
+                    continue
+                order_id = str(raw_order.get("order_id") or "").strip()
+                token_id = str(raw_order.get("asset_id") or "").strip()
+                side_text = str(raw_order.get("side") or "").strip().lower()
+                if not order_id or not token_id:
+                    continue
+                if side_text == "buy":
+                    side = Side.BUY
+                elif side_text == "sell":
+                    side = Side.SELL
+                else:
+                    continue
+                size = self._parse_number(
+                    raw_order.get("matched_amount"),
+                    field="matched_amount",
+                    context="trade.maker_order",
+                )
+                price = self._parse_number(
+                    raw_order.get("price"),
+                    field="price",
+                    context="trade.maker_order",
+                )
+                fee_rate_bps = int(
+                    self._parse_number(
+                        raw_order.get("fee_rate_bps"),
+                        field="fee_rate_bps",
+                        context="trade.maker_order",
+                    )
+                )
+                if size <= 0 or price <= 0:
+                    continue
+                dedupe_key = (trade_id, order_id)
+                if dedupe_key in seen:
+                    continue
+                seen.add(dedupe_key)
+                fills.append(
+                    MakerTradeFill(
+                        trade_id=trade_id,
+                        order_id=order_id,
+                        token_id=token_id,
+                        side=side,
+                        size=size,
+                        price=price,
+                        fee_rate_bps=max(0, fee_rate_bps),
+                        match_time=match_time,
+                    )
+                )
+        fills.sort(key=lambda item: (item.match_time, item.trade_id, item.order_id))
+        return fills
+
+    def get_recent_maker_trade_fills(self, *, after_ts: int) -> list[MakerTradeFill]:
+        self._require_preflight()
+        query_after = max(0, int(after_ts))
+        try:
+            from py_clob_client.clob_types import TradeParams  # type: ignore
+        except Exception as exc:  # pragma: no cover - runtime dependency path
+            raise RuntimeError(
+                "py-clob-client clob_types unavailable for trade fill call"
+            ) from exc
+        maker_address = self._funder_address or self._signer_address
+        try:
+            payload = self.client.get_trades(  # type: ignore[union-attr]
+                TradeParams(
+                    maker_address=maker_address,
+                    after=query_after,
+                ),
+                next_cursor="MA==",
+            )
+        except Exception as exc:  # pragma: no cover - live path
+            raise RuntimeError(f"get_trades failed: {self._exception_payload(exc)}") from exc
+        return self._parse_maker_trade_fills(payload, after_ts=query_after)
 
     def place_order(self, intent: OrderIntent, books: dict[str, OrderBookSnapshot]) -> OrderResult:
-        self.preflight()
+        del books
         now = datetime.now(tz=timezone.utc)
-        signature_attempts = [int(self._signature_type)]
-        for candidate in (2, 1, 0):
-            if candidate not in signature_attempts:
-                signature_attempts.append(candidate)
+        self._require_preflight()
+        try:
+            from py_clob_client.clob_types import (  # type: ignore
+                OrderArgs,
+                OrderType,
+            )
 
-        for attempt_idx, signature_type in enumerate(signature_attempts):
-            if attempt_idx > 0:
+            side = "BUY" if intent.side == Side.BUY else "SELL"
+            order_args = OrderArgs(
+                price=float(intent.price),
+                size=float(intent.size),
+                side=side,
+                token_id=intent.token_id,
+            )
+            signed_order = self.client.create_order(order_args)
+
+            order_type = getattr(OrderType, intent.tif.value, getattr(OrderType, "GTC"))
+            response = self.client.post_order(
+                signed_order, order_type, post_only=bool(intent.post_only)
+            )
+            response_payload = self._ensure_payload_object(
+                response, context="post_order"
+            )
+            status = self._parse_status(response_payload, default="accepted")
+            order_id = self._parse_order_id(response_payload)
+
+            order_state_payload: ClobOrderPayload | None = None
+            if order_id and intent.tif in {TimeInForce.IOC, TimeInForce.FOK}:
                 try:
-                    self._reinitialize_client_for_signature(signature_type)
-                except Exception as reinit_exc:
-                    payload = self._exception_payload(reinit_exc)
-                    if attempt_idx + 1 < len(signature_attempts):
-                        LOGGER.warning(
-                            "live_auth_retry_failed next_signature_type=%s error=%s",
-                            signature_type,
-                            payload.get("error", ""),
-                        )
-                        continue
-                    return OrderResult(
-                        order_id=f"live-{uuid.uuid4().hex[:12]}",
-                        market_id=intent.market_id,
-                        token_id=intent.token_id,
-                        side=intent.side,
-                        price=intent.price,
-                        size=intent.size,
-                        status="error",
-                        filled_size=0.0,
-                        filled_price=0.0,
-                        fee_paid=0.0,
-                        engine=intent.engine,
-                        created_at=now,
-                        raw=payload,
+                    details = self.client.get_order(order_id)
+                    order_state_payload = self._ensure_payload_object(
+                        details, context="get_order"
                     )
+                    status = self._parse_status(order_state_payload, default=status)
+                except Exception:
+                    order_state_payload = None
 
-            try:
-                from py_clob_client.clob_types import OrderArgs, OrderType  # type: ignore
-
-                side = "BUY" if intent.side == Side.BUY else "SELL"
-                order_args = OrderArgs(
-                    price=float(intent.price),
-                    size=float(intent.size),
-                    side=side,
-                    token_id=intent.token_id,
-                )
-                signed_order = self.client.create_order(order_args)
-
-                order_type = getattr(OrderType, intent.tif.value, getattr(OrderType, "GTC"))
-                response = self.client.post_order(signed_order, order_type, post_only=bool(intent.post_only))
-                response_payload = response if isinstance(response, dict) else {}
-                status = self._extract_status(response_payload, default="accepted")
-                order_id = self._extract_order_id(response_payload)
-
-                order_state_payload: dict[str, Any] = {}
-                if order_id and intent.tif in {TimeInForce.IOC, TimeInForce.FOK}:
+            fill_source = order_state_payload or response_payload
+            fill = self._parse_fill(
+                fill_source,
+                context="order_state" if order_state_payload is not None else "post_order",
+            )
+            filled_size = fill.filled_size
+            filled_price = fill.filled_price
+            fee_paid = fill.fee_paid
+            if (
+                intent.tif in {TimeInForce.IOC, TimeInForce.FOK}
+                and order_id
+                and filled_size <= 0
+                and status in {"filled", "matched", "executed", "completed", "complete"}
+            ):
+                for _ in range(2):
+                    time.sleep(0.12)
                     try:
-                        details = self.client.get_order(order_id)
-                        if isinstance(details, dict):
-                            order_state_payload = details
-                            status = self._extract_status(order_state_payload, default=status)
+                        details_retry = self.client.get_order(order_id)
                     except Exception:
-                        pass
-
-                fill_source = order_state_payload if order_state_payload else response_payload
-                filled_size, filled_price, fee_paid = self._extract_fill_fields(
-                    payload=fill_source,
-                    fallback_size=float(intent.size),
-                    fallback_price=float(intent.price),
-                )
-                raw_payload: dict[str, Any] = {"post_order": response_payload, "signature_type": self._signature_type}
-                if order_state_payload:
-                    raw_payload["order_state"] = order_state_payload
-                return OrderResult(
-                    order_id=order_id,
-                    market_id=intent.market_id,
-                    token_id=intent.token_id,
-                    side=intent.side,
-                    price=intent.price,
-                    size=intent.size,
-                    status=status,
-                    filled_size=filled_size,
-                    filled_price=filled_price,
-                    fee_paid=fee_paid,
-                    engine=intent.engine,
-                    created_at=now,
-                    raw=raw_payload,
-                )
-            except Exception as exc:  # pragma: no cover - live path
-                payload = self._exception_payload(exc)
-                payload["signature_type"] = self._signature_type
-                if self._is_invalid_signature_payload(payload) and attempt_idx + 1 < len(signature_attempts):
-                    LOGGER.warning(
-                        "order_invalid_signature_retry market=%s current_signature_type=%s next_signature_type=%s",
-                        intent.market_id,
-                        self._signature_type,
-                        signature_attempts[attempt_idx + 1],
+                        continue
+                    try:
+                        details_retry_payload = self._ensure_payload_object(
+                            details_retry, context="get_order"
+                        )
+                    except Exception:
+                        continue
+                    retry_status = self._parse_status(details_retry_payload, default=status)
+                    retry_fill = self._parse_fill(
+                        details_retry_payload, context="order_state"
                     )
-                    continue
-                return OrderResult(
-                    order_id=f"live-{uuid.uuid4().hex[:12]}",
-                    market_id=intent.market_id,
-                    token_id=intent.token_id,
-                    side=intent.side,
-                    price=intent.price,
-                    size=intent.size,
-                    status="error",
-                    filled_size=0.0,
-                    filled_price=0.0,
-                    fee_paid=0.0,
-                    engine=intent.engine,
-                    created_at=now,
-                    raw=payload,
-                )
+                    if retry_fill.filled_size > 0:
+                        order_state_payload = details_retry_payload
+                        status = retry_status
+                        filled_size = retry_fill.filled_size
+                        filled_price = retry_fill.filled_price
+                        fee_paid = retry_fill.fee_paid
+                        break
 
+            raw_payload: dict[str, Any] = {
+                "post_order": response_payload,
+                "signature_type": self._signature_type,
+            }
+            if order_state_payload is not None:
+                raw_payload["order_state"] = order_state_payload
+            raw_payload["fill_source"] = (
+                "order_state" if order_state_payload is not None else "post_order"
+            )
+            return OrderResult(
+                order_id=order_id,
+                market_id=intent.market_id,
+                token_id=intent.token_id,
+                side=intent.side,
+                price=intent.price,
+                size=intent.size,
+                status=status,
+                filled_size=filled_size,
+                filled_price=filled_price,
+                fee_paid=fee_paid,
+                engine=intent.engine,
+                created_at=now,
+                raw=raw_payload,
+            )
+        except Exception as exc:  # pragma: no cover - live path
+            payload = self._exception_payload(exc)
+            payload["signature_type"] = self._signature_type
+            if self._is_invalid_signature_payload(payload):
+                raise RuntimeError(
+                    "Live auth failed during order placement (no retries). "
+                    f"signer={self._signer_address} funder={self._funder_address} signature_type={self._signature_type} "
+                    f"error={payload}"
+                ) from exc
+            return OrderResult(
+                order_id=f"live-{uuid.uuid4().hex[:12]}",
+                market_id=intent.market_id,
+                token_id=intent.token_id,
+                side=intent.side,
+                price=intent.price,
+                size=intent.size,
+                status="error",
+                filled_size=0.0,
+                filled_price=0.0,
+                fee_paid=0.0,
+                engine=intent.engine,
+                created_at=now,
+                raw=payload,
+            )
+
+    def get_order_result(self, order_id: str, intent: OrderIntent) -> OrderResult | None:
+        self._require_preflight()
+        now = datetime.now(tz=timezone.utc)
+        try:  # pragma: no cover - live path
+            details = self.client.get_order(order_id)
+        except Exception:
+            return None
+        try:
+            details_payload = self._ensure_payload_object(details, context="get_order")
+        except Exception:
+            return None
+        status = self._parse_status(details_payload, default="live")
+        fill = self._parse_fill(details_payload, context="get_order")
         return OrderResult(
-            order_id=f"live-{uuid.uuid4().hex[:12]}",
+            order_id=order_id,
             market_id=intent.market_id,
             token_id=intent.token_id,
             side=intent.side,
             price=intent.price,
             size=intent.size,
-            status="error",
-            filled_size=0.0,
-            filled_price=0.0,
-            fee_paid=0.0,
+            status=status,
+            filled_size=fill.filled_size,
+            filled_price=fill.filled_price,
+            fee_paid=fill.fee_paid,
             engine=intent.engine,
             created_at=now,
-            raw={"error": "signature retry exhausted"},
+            raw={
+                "order_state": details_payload,
+                "reconciled": True,
+                "signature_type": self._signature_type,
+                "fill_source": "get_order",
+            },
         )
 
     def cancel_order(self, order_id: str) -> bool:
@@ -834,43 +1163,75 @@ class LiveExecutor(BaseExecutor):
         return bytes.fromhex(raw)
 
     @staticmethod
-    def _receipt_status(receipt: Any) -> int:
-        if receipt is None:
-            return 0
-        raw = receipt.get("status") if isinstance(receipt, dict) else getattr(receipt, "status", None)
-        if raw is None:
-            return 0
-        if isinstance(raw, str):
-            return int(raw, 16) if raw.startswith("0x") else int(raw)
-        return int(raw)
+    def _receipt_map(receipt: Any) -> dict[str, Any]:
+        if isinstance(receipt, dict):
+            return receipt
+        if hasattr(receipt, "items"):
+            try:
+                return dict(receipt.items())
+            except Exception as exc:  # pragma: no cover - defensive
+                raise RuntimeError("unreadable receipt mapping") from exc
+        raise RuntimeError(f"unsupported receipt type: {type(receipt).__name__}")
 
     @staticmethod
-    def _receipt_summary(receipt: Any) -> dict[str, Any]:
-        if receipt is None:
-            return {}
+    def _parse_receipt_int(value: Any, *, field: str) -> int:
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                raise RuntimeError(f"receipt field {field} is empty")
+            try:
+                return int(text, 16) if text.startswith("0x") else int(text)
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"receipt field {field} is not an integer: {value!r}"
+                ) from exc
+        raise RuntimeError(
+            f"receipt field {field} has unsupported type: {type(value).__name__}"
+        )
 
-        def _as_hex(value: Any) -> str:
-            if hasattr(value, "hex"):
-                return str(value.hex())
-            if isinstance(value, bytes):
-                return "0x" + value.hex()
-            return str(value)
+    @staticmethod
+    def _parse_receipt_hex(value: Any, *, field: str) -> str:
+        if isinstance(value, (bytes, bytearray)):
+            return "0x" + bytes(value).hex()
+        hex_method = getattr(value, "hex", None)
+        if callable(hex_method):
+            raw = hex_method()
+            text = raw.decode() if isinstance(raw, bytes) else str(raw)
+            return text if text.startswith("0x") else f"0x{text}"
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                raise RuntimeError(f"receipt field {field} is empty")
+            return text
+        raise RuntimeError(
+            f"receipt field {field} has unsupported type: {type(value).__name__}"
+        )
 
-        out: dict[str, Any] = {
-            "status": LiveExecutor._receipt_status(receipt),
+    @classmethod
+    def _receipt_payload(cls, receipt: Any) -> dict[str, Any]:
+        raw = cls._receipt_map(receipt)
+        if "status" not in raw:
+            raise RuntimeError("receipt missing status")
+
+        payload: dict[str, Any] = {
+            "status": cls._parse_receipt_int(raw.get("status"), field="status"),
         }
+
         for key in ("transactionHash", "blockHash"):
-            value = receipt.get(key) if isinstance(receipt, dict) else getattr(receipt, key, None)
-            if value is not None:
-                out[key] = _as_hex(value)
+            if key not in raw or raw.get(key) is None:
+                continue
+            payload[key] = cls._parse_receipt_hex(raw.get(key), field=key)
+
         for key in ("blockNumber", "gasUsed", "effectiveGasPrice"):
-            value = receipt.get(key) if isinstance(receipt, dict) else getattr(receipt, key, None)
-            if value is not None:
-                try:
-                    out[key] = int(value)
-                except Exception:
-                    out[key] = str(value)
-        return out
+            if key not in raw or raw.get(key) is None:
+                continue
+            payload[key] = cls._parse_receipt_int(raw.get(key), field=key)
+
+        return payload
 
     def _web3(self):
         if self._w3 is not None:
@@ -879,7 +1240,9 @@ class LiveExecutor(BaseExecutor):
             from web3 import Web3
             from web3.middleware import geth_poa_middleware
         except Exception as exc:
-            raise RuntimeError("web3 is required for merge/redeem. Install with `pip install web3`.") from exc
+            raise RuntimeError(
+                "web3 is required for merge/redeem. Install with `pip install web3`."
+            ) from exc
 
         provider = Web3.HTTPProvider(
             self.config.polygon_rpc_url,
@@ -909,30 +1272,42 @@ class LiveExecutor(BaseExecutor):
             raise
 
     def _using_proxy_wallet(self) -> bool:
-        self.preflight()
-        return self._normalize_address(self._funder_address) != self._normalize_address(self._signer_address)
+        self._require_preflight()
+        return self._normalize_address(self._funder_address) != self._normalize_address(
+            self._signer_address
+        )
 
     def _wrap_proxy_call(self, *, target_address: str, calldata: bytes):
         from web3 import Web3
 
         proxy_factory = str(self.config.poly_proxy_factory_address or "").strip()
         if not proxy_factory:
-            raise RuntimeError("POLY_PROXY_FACTORY_ADDRESS is required for proxy-wallet settlement")
+            raise RuntimeError(
+                "POLY_PROXY_FACTORY_ADDRESS is required for proxy-wallet settlement"
+            )
         w3 = self._web3()
-        factory = w3.eth.contract(address=Web3.to_checksum_address(proxy_factory), abi=PROXY_FACTORY_ABI)
-        return factory.functions.proxy([(1, Web3.to_checksum_address(target_address), 0, calldata)])
+        factory = w3.eth.contract(
+            address=Web3.to_checksum_address(proxy_factory), abi=PROXY_FACTORY_ABI
+        )
+        return factory.functions.proxy(
+            [(1, Web3.to_checksum_address(target_address), 0, calldata)]
+        )
 
     def _send_function_tx(self, fn) -> str:
-        self.preflight()
+        self._require_preflight()
         if not self.config.poly_private_key:
             raise RuntimeError("POLY_PRIVATE_KEY missing")
         try:
             from eth_account import Account
         except Exception as exc:
-            raise RuntimeError("eth-account is required for merge/redeem. Install with `pip install eth-account`.") from exc
+            raise RuntimeError(
+                "eth-account is required for merge/redeem. Install with `pip install eth-account`."
+            ) from exc
 
         signer = Account.from_key(self.config.poly_private_key).address
-        if self._signer_address and self._normalize_address(signer) != self._normalize_address(self._signer_address):
+        if self._signer_address and self._normalize_address(
+            signer
+        ) != self._normalize_address(self._signer_address):
             raise RuntimeError("signer mismatch with live auth credentials")
 
         w3 = self._web3()
@@ -952,27 +1327,44 @@ class LiveExecutor(BaseExecutor):
         tx["gas"] = max(21_000, int(gas_limit * 1.20))
 
         signed = Account.sign_transaction(tx, self.config.poly_private_key)
-        raw_tx = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction", None)
+        raw_tx = getattr(signed, "raw_transaction", None) or getattr(
+            signed, "rawTransaction", None
+        )
         if raw_tx is None:
             raise RuntimeError("unable to access signed raw transaction")
         tx_hash = w3.eth.send_raw_transaction(raw_tx)
         return tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
 
     def _resolve_pending_merge(self, market_id: str) -> SettlementResult | None:
-        pending = self._pending_merges.get(market_id)
+        pending: PendingMergePayload | None = self._pending_merges.get(market_id)
         if pending is None:
             return None
         tx_hash = str(pending.get("tx_hash") or "")
         receipt = self._read_receipt(tx_hash)
         if receipt is None:
-            return SettlementResult(status="pending", merged_size=0.0, raw=dict(pending))
+            return SettlementResult(
+                status="pending", merged_size=0.0, raw=dict(pending)
+            )
 
-        self._pending_merges.pop(market_id, None)
-        status = self._receipt_status(receipt)
         payload = dict(pending)
-        payload["receipt"] = self._receipt_summary(receipt)
+        try:
+            receipt_payload = self._receipt_payload(receipt)
+        except Exception as exc:
+            payload["receipt_parse_error"] = self._exception_payload(exc)
+            return SettlementResult(
+                status="pending",
+                merged_size=0.0,
+                raw=payload,
+            )
+        self._pending_merges.pop(market_id, None)
+        status = int(receipt_payload["status"])
+        payload["receipt"] = receipt_payload
         if status == 1:
-            return SettlementResult(status="merged", merged_size=float(pending.get("merged_size", 0.0)), raw=payload)
+            return SettlementResult(
+                status="merged",
+                merged_size=float(pending.get("merged_size", 0.0)),
+                raw=payload,
+            )
         payload["reason"] = "merge transaction reverted"
         return SettlementResult(status="error", raw=payload)
 
@@ -983,17 +1375,30 @@ class LiveExecutor(BaseExecutor):
             if receipt is None:
                 return SettlementResult(status="pending", raw=dict(pending))
 
-            self._pending_redeems.pop(condition_id, None)
-            status = self._receipt_status(receipt)
             payload = dict(pending)
-            payload["receipt"] = self._receipt_summary(receipt)
+            try:
+                receipt_payload = self._receipt_payload(receipt)
+            except Exception as exc:
+                payload["receipt_parse_error"] = self._exception_payload(exc)
+                return SettlementResult(status="pending", raw=payload)
+            self._pending_redeems.pop(condition_id, None)
+            status = int(receipt_payload["status"])
+            payload["receipt"] = receipt_payload
             if status == 1:
-                return SettlementResult(status="redeemed", redeemed_usdc=0.0, raw=payload)
+                return SettlementResult(
+                    status="redeemed", redeemed_usdc=0.0, raw=payload
+                )
             payload["reason"] = "redeem transaction reverted"
             return SettlementResult(status="error", raw=payload)
         return None
 
-    def register_condition(self, *, condition_id: str, is_neg_risk: bool, market_end_ts: float | None = None) -> None:
+    def register_condition(
+        self,
+        *,
+        condition_id: str,
+        is_neg_risk: bool,
+        market_end_ts: float | None = None,
+    ) -> None:
         try:
             normalized = self._normalize_condition_id(condition_id)
         except Exception:
@@ -1004,18 +1409,23 @@ class LiveExecutor(BaseExecutor):
             self._known_conditions[normalized] = (bool(is_neg_risk), end_ts)
             return
         existing_neg_risk, existing_end = existing
-        self._known_conditions[normalized] = (existing_neg_risk or bool(is_neg_risk), max(existing_end, end_ts))
+        self._known_conditions[normalized] = (
+            existing_neg_risk or bool(is_neg_risk),
+            max(existing_end, end_ts),
+        )
 
     def _resolve_neg_risk_flag(self, *, token_id: str, hinted: bool | None) -> bool:
         if hinted is not None:
             return bool(hinted)
-        self.preflight()
+        self._require_preflight()
         try:
             return bool(self.client.get_neg_risk(token_id))
         except Exception:
             return False
 
-    def _build_merge_function(self, *, condition_id: str, amount_raw: int, is_neg_risk: bool):
+    def _build_merge_function(
+        self, *, condition_id: str, amount_raw: int, is_neg_risk: bool
+    ):
         from web3 import Web3
 
         w3 = self._web3()
@@ -1023,13 +1433,17 @@ class LiveExecutor(BaseExecutor):
         if is_neg_risk:
             adapter = Web3.to_checksum_address(str(config.exchange))
             contract = w3.eth.contract(address=adapter, abi=NEG_RISK_ADAPTER_ABI)
-            return contract.functions.mergePositions(condition_id, int(amount_raw)), adapter
+            return contract.functions.mergePositions(
+                condition_id, int(amount_raw)
+            ), adapter
 
         conditional = Web3.to_checksum_address(str(config.conditional_tokens))
         collateral = Web3.to_checksum_address(str(config.collateral))
         contract = w3.eth.contract(address=conditional, abi=CONDITIONAL_TOKENS_ABI)
         return (
-            contract.functions.mergePositions(collateral, ZERO_BYTES32, condition_id, [1, 2], int(amount_raw)),
+            contract.functions.mergePositions(
+                collateral, ZERO_BYTES32, condition_id, [1, 2], int(amount_raw)
+            ),
             conditional,
         )
 
@@ -1041,7 +1455,9 @@ class LiveExecutor(BaseExecutor):
         conditional = Web3.to_checksum_address(str(config.conditional_tokens))
         collateral = Web3.to_checksum_address(str(config.collateral))
         contract = w3.eth.contract(address=conditional, abi=CONDITIONAL_TOKENS_ABI)
-        return contract.functions.redeemPositions(collateral, ZERO_BYTES32, condition_id, [1, 2]), conditional
+        return contract.functions.redeemPositions(
+            collateral, ZERO_BYTES32, condition_id, [1, 2]
+        ), conditional
 
     def merge_pairs(
         self,
@@ -1056,20 +1472,26 @@ class LiveExecutor(BaseExecutor):
         del secondary_token_id
         safe_size = max(0.0, float(size))
         if safe_size <= 0:
-            return SettlementResult(status="error", raw={"reason": "merge size must be > 0"})
+            return SettlementResult(
+                status="error", raw={"reason": "merge size must be > 0"}
+            )
 
         pending = self._resolve_pending_merge(market_id)
         if pending is not None:
             return pending
         if not condition_id:
-            return SettlementResult(status="unsupported", raw={"reason": "missing condition_id"})
+            return SettlementResult(
+                status="unsupported", raw={"reason": "missing condition_id"}
+            )
 
         try:
             normalized_condition = self._normalize_condition_id(condition_id)
         except Exception as exc:
             return SettlementResult(status="error", raw=self._exception_payload(exc))
 
-        neg_risk = self._resolve_neg_risk_flag(token_id=primary_token_id, hinted=is_neg_risk)
+        neg_risk = self._resolve_neg_risk_flag(
+            token_id=primary_token_id, hinted=is_neg_risk
+        )
         amount_raw = max(1, int(round(safe_size * 1_000_000.0)))
         try:
             merge_fn, merge_target = self._build_merge_function(
@@ -1090,7 +1512,7 @@ class LiveExecutor(BaseExecutor):
             return SettlementResult(status="error", raw=self._exception_payload(exc))
 
         merged_size = amount_raw / 1_000_000.0
-        pending_payload = {
+        pending_payload: PendingMergePayload = {
             "tx_hash": tx_hash,
             "market_id": market_id,
             "condition_id": normalized_condition,
@@ -1120,7 +1542,9 @@ class LiveExecutor(BaseExecutor):
             if (not is_neg_risk) and (end_ts <= 0.0 or now_ts >= (end_ts + 120.0))
         ]
         if not candidates:
-            return SettlementResult(status="ok", raw={"reason": "no redeem-eligible conditions"})
+            return SettlementResult(
+                status="ok", raw={"reason": "no redeem-eligible conditions"}
+            )
 
         candidates.sort()
         idx = self._redeem_cursor % len(candidates)
@@ -1128,7 +1552,9 @@ class LiveExecutor(BaseExecutor):
         condition_id = candidates[idx]
 
         try:
-            redeem_fn, redeem_target = self._build_redeem_function(condition_id=condition_id)
+            redeem_fn, redeem_target = self._build_redeem_function(
+                condition_id=condition_id
+            )
             route = "direct"
             submit_fn = redeem_fn
             if self._using_proxy_wallet():
@@ -1147,7 +1573,7 @@ class LiveExecutor(BaseExecutor):
                 },
             )
 
-        pending_payload = {
+        pending_payload: PendingRedeemPayload = {
             "tx_hash": tx_hash,
             "condition_id": condition_id,
             "route": route,

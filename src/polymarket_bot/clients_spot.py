@@ -5,11 +5,25 @@ import json
 import logging
 import threading
 import time
-from typing import Callable
+from typing import Any, Callable, TypedDict, cast
 
 from polymarket_bot.http_utils import get_json, websocket_sslopt
 
 LOGGER = logging.getLogger("polymarket_bot")
+
+
+class CoinbaseSpotData(TypedDict):
+    amount: str | int | float
+
+
+class CoinbaseSpotPayload(TypedDict):
+    data: CoinbaseSpotData
+
+
+class BinanceTradePayload(TypedDict, total=False):
+    p: str | int | float
+    E: int | float
+    T: int | float
 
 
 @dataclass
@@ -17,16 +31,38 @@ class BtcSpotClient:
     url: str
     timeout_seconds: float = 5.0
 
+    @staticmethod
+    def _parse_number(value: Any, *, field: str) -> float:
+        if isinstance(value, bool):
+            raise RuntimeError(f"spot field {field} cannot be boolean")
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                raise RuntimeError(f"spot field {field} is empty")
+            try:
+                return float(text)
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"spot field {field} must be numeric, got {value!r}"
+                ) from exc
+        raise RuntimeError(f"spot field {field} has unsupported type {type(value).__name__}")
+
     def get_price(self) -> float:
         payload = get_json(self.url, timeout=self.timeout_seconds)
-
-        if isinstance(payload, dict):
-            data = payload.get("data")
-            if isinstance(data, dict) and "amount" in data:
-                return float(data["amount"])
-            if "price" in payload:
-                return float(payload["price"])
-        raise RuntimeError("Unable to parse BTC spot price response")
+        if not isinstance(payload, dict):
+            raise RuntimeError("Spot REST payload must be a JSON object")
+        payload_obj = cast(CoinbaseSpotPayload, payload)
+        data = payload_obj.get("data")
+        if not isinstance(data, dict):
+            raise RuntimeError("Spot REST payload missing data object")
+        if "amount" not in data:
+            raise RuntimeError("Spot REST payload missing data.amount")
+        price = self._parse_number(data.get("amount"), field="data.amount")
+        if price <= 0:
+            raise RuntimeError(f"Spot REST price must be > 0, got {price}")
+        return price
 
 
 class BtcSpotStream:
@@ -128,16 +164,21 @@ class BtcSpotStream:
             payload = json.loads(message)
         except Exception:
             return
-        price_raw = payload.get("p") or payload.get("c") or payload.get("price")
+        if not isinstance(payload, dict):
+            return
+        payload_obj = cast(BinanceTradePayload, payload)
+        price_raw = payload_obj.get("p")
         if price_raw is None:
             return
         try:
-            price = float(price_raw)
+            price = self.rest_client._parse_number(price_raw, field="p")
         except Exception:
             return
         if price <= 0:
             return
-        ts_ms = payload.get("E") or payload.get("T")
+        ts_ms = payload_obj.get("E")
+        if ts_ms is None:
+            ts_ms = payload_obj.get("T")
         if isinstance(ts_ms, (int, float)):
             ts = float(ts_ms) / 1000.0
         else:

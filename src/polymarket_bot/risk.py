@@ -5,14 +5,27 @@ from datetime import datetime, timezone
 from typing import Iterable
 
 from polymarket_bot.config import BotConfig
-from polymarket_bot.models import OrderIntent, OrderResult, PositionState, RiskState, Side
-from polymarket_bot.pricing import per_share_fee
+from polymarket_bot.models import (
+    OrderIntent,
+    OrderResult,
+    PositionState,
+    RiskState,
+    Side,
+)
 
 
 @dataclass
 class RiskDecision:
     allowed: bool
     reason: str = ""
+
+
+@dataclass(frozen=True)
+class InventorySyncResult:
+    cash_before: float
+    cash_after: float
+    token_size_changes: dict[str, tuple[float, float]]
+    unknown_market_tokens: tuple[str, ...]
 
 
 class RiskManager:
@@ -42,7 +55,9 @@ class RiskManager:
         self._roll_day(now)
 
     def current_equity(self) -> float:
-        return self.cash + sum(pos.size * pos.mark_price for pos in self.positions.values())
+        return self.cash + sum(
+            pos.size * pos.mark_price for pos in self.positions.values()
+        )
 
     def total_exposure(self) -> float:
         return sum(self.market_exposure.values())
@@ -67,13 +82,7 @@ class RiskManager:
         if self.halted and intent.side == Side.BUY:
             return RiskDecision(False, f"risk halted: {self.halted_reason}")
         if intent.side == Side.BUY:
-            fee_bps_raw = intent.metadata.get("fee_bps", 0)
-            try:
-                fee_bps = int(fee_bps_raw)
-            except (TypeError, ValueError):
-                fee_bps = 0
-            est_fee = per_share_fee(intent.price, fee_bps) * max(0.0, intent.size)
-            required_cash = max(0.0, intent.notional) + max(0.0, est_fee)
+            required_cash = max(0.0, intent.notional)
             if required_cash > (self.cash + 1e-9):
                 return RiskDecision(False, "cash budget exceeded")
         return RiskDecision(True, "")
@@ -87,7 +96,10 @@ class RiskManager:
         )
 
         if result.side == Side.BUY:
-            total_cost = position.average_price * position.size + result.filled_price * result.filled_size
+            total_cost = (
+                position.average_price * position.size
+                + result.filled_price * result.filled_size
+            )
             new_size = position.size + result.filled_size
             position.average_price = total_cost / new_size if new_size > 0 else 0.0
             position.size = new_size
@@ -104,6 +116,62 @@ class RiskManager:
 
         self.positions[result.token_id] = position
         self._recompute_market_exposure()
+
+    def sync_exchange_inventory(
+        self,
+        *,
+        cash: float,
+        token_sizes: dict[str, float],
+        token_market_ids: dict[str, str],
+    ) -> InventorySyncResult:
+        cash_before = self.cash
+        self.cash = max(0.0, float(cash))
+
+        size_changes: dict[str, tuple[float, float]] = {}
+        unknown_market_tokens: list[str] = []
+        for token_id, raw_size in token_sizes.items():
+            cleaned_token_id = str(token_id or "").strip()
+            if not cleaned_token_id:
+                continue
+            new_size = max(0.0, float(raw_size))
+            existing = self.positions.get(cleaned_token_id)
+            market_id = (token_market_ids.get(cleaned_token_id) or "").strip()
+            if existing is None:
+                if not market_id:
+                    if new_size > 1e-9:
+                        unknown_market_tokens.append(cleaned_token_id)
+                    continue
+                existing = PositionState(
+                    token_id=cleaned_token_id,
+                    market_id=market_id,
+                )
+            elif market_id:
+                existing.market_id = market_id
+
+            previous_size = max(0.0, existing.size)
+            if abs(previous_size - new_size) > 1e-9:
+                size_changes[cleaned_token_id] = (previous_size, new_size)
+
+            if new_size <= 1e-9:
+                existing.size = 0.0
+                existing.average_price = 0.0
+            else:
+                # If inventory appeared outside local fill accounting, keep a
+                # conservative non-zero average so pair-cost logic does not
+                # assume free inventory.
+                if previous_size <= 1e-9 and existing.average_price <= 0:
+                    existing.average_price = max(0.5, existing.mark_price)
+                existing.size = new_size
+
+            self.positions[cleaned_token_id] = existing
+
+        self._recompute_market_exposure()
+        return InventorySyncResult(
+            cash_before=cash_before,
+            cash_after=self.cash,
+            token_size_changes=size_changes,
+            unknown_market_tokens=tuple(sorted(set(unknown_market_tokens))),
+        )
 
     def apply_merge(
         self,
@@ -163,7 +231,9 @@ class RiskManager:
     def _projected_market_exposure(self, intent: OrderIntent) -> float:
         by_market = self._token_notionals_by_market()
         token_notionals = dict(by_market.get(intent.market_id, {}))
-        token_notionals[intent.token_id] = token_notionals.get(intent.token_id, 0.0) + max(0.0, intent.notional)
+        token_notionals[intent.token_id] = token_notionals.get(
+            intent.token_id, 0.0
+        ) + max(0.0, intent.notional)
         if not token_notionals:
             return 0.0
         # Two-sided binary inventory is partially hedged; cap by dominant leg not sum of both legs.

@@ -145,6 +145,14 @@ class Storage:
         self.conn.commit()
 
     def record_order(self, intent: OrderIntent, result: OrderResult, mode: str) -> None:
+        metadata_payload = dict(intent.metadata)
+        metadata_payload["_execution"] = {
+            "status": result.status,
+            "filled_size": result.filled_size,
+            "filled_price": result.filled_price,
+            "fee_paid": result.fee_paid,
+            "raw": result.raw,
+        }
         self.conn.execute(
             """
             INSERT INTO orders (
@@ -166,7 +174,7 @@ class Storage:
                 result.fee_paid,
                 result.engine,
                 mode,
-                json.dumps(intent.metadata, separators=(",", ":"), default=str),
+                json.dumps(metadata_payload, separators=(",", ":"), default=str),
             ),
         )
         self.conn.commit()
@@ -281,6 +289,11 @@ class Storage:
             """
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def clear_pair_learning_data(self) -> None:
+        self.conn.execute("DELETE FROM pair_learning_events")
+        self.conn.execute("DELETE FROM pair_learning_stats")
+        self.conn.commit()
 
     def report(self, window_hours: int) -> dict[str, Any]:
         cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=window_hours)

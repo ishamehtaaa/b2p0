@@ -8,6 +8,49 @@ ALL_TAGS = (102892, 102467, 102175)
 DEFAULT_TAGS = ALL_TAGS
 
 
+def _parse_enabled_tags(raw: str | None) -> tuple[int, ...]:
+    text = (raw or "").strip()
+    if not text:
+        return DEFAULT_TAGS
+    values: list[int] = []
+    for chunk in text.split(","):
+        item = chunk.strip()
+        if not item:
+            continue
+        try:
+            values.append(int(item))
+        except ValueError:
+            continue
+    return tuple(values) if values else DEFAULT_TAGS
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return int(default)
+    try:
+        return int(raw)
+    except ValueError:
+        return int(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return float(default)
+    try:
+        return float(raw)
+    except ValueError:
+        return float(default)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw in {"1", "true", "yes", "y", "on"}
+
+
 @dataclass(frozen=True)
 class BotConfig:
     mode: str
@@ -28,6 +71,9 @@ class BotConfig:
     max_trade_markets_5m: int
     max_trade_markets_15m: int
     max_trade_markets_1h: int
+    single_5m_deep_mode: bool
+    single_5m_pause_for_redeem: bool
+    single_5m_pause_seconds: float
 
     bankroll_usdc: float
     canary_cap_pct: float
@@ -37,7 +83,6 @@ class BotConfig:
     max_consecutive_exec_errors: int
     stale_feed_seconds: float
     pair_max_intents_per_cycle: int
-    use_reference_trader_learning: bool
 
     maker_min_spread: float
     maker_min_depth_usdc_top2: float
@@ -87,8 +132,6 @@ class BotConfig:
 
 
 def load_config() -> BotConfig:
-    raw_reference_learning = os.getenv("ENABLE_REFERENCE_LEARNING", "").strip().lower()
-    use_reference_learning = raw_reference_learning in {"1", "true", "yes", "y", "on"}
     raw_signature_type = os.getenv("POLY_SIGNATURE_TYPE", "").strip()
     parsed_signature_type: int | None = None
     if raw_signature_type:
@@ -109,22 +152,24 @@ def load_config() -> BotConfig:
         btc_spot_ws_url="wss://stream.binance.com:9443/ws/btcusdt@trade",
         database_path=os.getenv("BOT_DB_PATH", "data/bot.db"),
         api_timeout_seconds=3.0,
-        enabled_tags=DEFAULT_TAGS,
+        enabled_tags=_parse_enabled_tags(os.getenv("BOT_ENABLED_TAGS")),
         poll_interval_seconds=1.0,
         fee_poll_interval_seconds=60.0,
         max_markets_per_tag=120,
-        max_trade_markets_5m=3,
-        max_trade_markets_15m=3,
-        max_trade_markets_1h=3,
+        max_trade_markets_5m=max(0, _env_int("MAX_TRADE_MARKETS_5M", 3)),
+        max_trade_markets_15m=max(0, _env_int("MAX_TRADE_MARKETS_15M", 3)),
+        max_trade_markets_1h=max(0, _env_int("MAX_TRADE_MARKETS_1H", 3)),
+        single_5m_deep_mode=_env_bool("SINGLE_5M_DEEP_MODE", False),
+        single_5m_pause_for_redeem=_env_bool("SINGLE_5M_PAUSE_FOR_REDEEM", False),
+        single_5m_pause_seconds=max(0.0, _env_float("SINGLE_5M_PAUSE_SECONDS", 0.0)),
         bankroll_usdc=5000.0,
         canary_cap_pct=0.10,
         max_daily_dd_pct=0.25,
-        max_total_exposure_pct=0.95,
-        max_market_exposure_pct=0.60,
+        max_total_exposure_pct=1.00,
+        max_market_exposure_pct=1.00,
         max_consecutive_exec_errors=3,
         stale_feed_seconds=5.0,
         pair_max_intents_per_cycle=max(2, int(os.getenv("PAIR_MAX_INTENTS", "18"))),
-        use_reference_trader_learning=use_reference_learning,
         maker_min_spread=0.01,
         maker_min_depth_usdc_top2=250.0,
         maker_quote_notional=25.0,
@@ -133,8 +178,8 @@ def load_config() -> BotConfig:
         directional_threshold=0.035,
         directional_notional=25.0,
         directional_slippage_buffer=0.002,
-        directional_min_time_left_5m=90,
-        directional_min_time_left_15m=120,
+        directional_min_time_left_5m=max(10, _env_int("MIN_TIME_LEFT_5M", 45)),
+        directional_min_time_left_15m=max(30, _env_int("MIN_TIME_LEFT_15M", 120)),
         tenor_dislocation_threshold=0.06,
         tenor_arb_notional=20.0,
         allowed_region="CA",

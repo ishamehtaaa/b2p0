@@ -208,6 +208,50 @@ class RiskTests(unittest.TestCase):
         self.assertAlmostEqual(risk.positions["down"].size, 3.0, places=6)
         self.assertAlmostEqual(risk.cash - cash_before, 12.0, places=6)
 
+    def test_sync_exchange_inventory_overrides_sizes_and_cash(self) -> None:
+        cfg = test_config(bankroll_usdc=100.0)
+        risk = RiskManager(cfg)
+        risk.apply_fill(
+            OrderResult(
+                order_id="o1",
+                market_id="m1",
+                token_id="up",
+                side=Side.BUY,
+                price=0.40,
+                size=10.0,
+                status="filled",
+                filled_size=10.0,
+                filled_price=0.40,
+                fee_paid=0.0,
+                engine="test",
+                created_at=datetime.now(tz=timezone.utc),
+                raw={},
+            )
+        )
+        result = risk.sync_exchange_inventory(
+            cash=81.25,
+            token_sizes={"up": 35.0, "down": 35.0},
+            token_market_ids={"up": "m1", "down": "m1"},
+        )
+        self.assertAlmostEqual(risk.cash, 81.25, places=6)
+        self.assertAlmostEqual(risk.positions["up"].size, 35.0, places=6)
+        self.assertAlmostEqual(risk.positions["down"].size, 35.0, places=6)
+        self.assertAlmostEqual(result.cash_after, 81.25, places=6)
+        self.assertIn("up", result.token_size_changes)
+        self.assertIn("down", result.token_size_changes)
+        self.assertEqual(result.unknown_market_tokens, ())
+
+    def test_sync_exchange_inventory_tracks_unknown_market_tokens(self) -> None:
+        cfg = test_config(bankroll_usdc=100.0)
+        risk = RiskManager(cfg)
+        result = risk.sync_exchange_inventory(
+            cash=100.0,
+            token_sizes={"orphan-token": 5.0},
+            token_market_ids={},
+        )
+        self.assertEqual(result.unknown_market_tokens, ("orphan-token",))
+        self.assertNotIn("orphan-token", risk.positions)
+
 
 if __name__ == "__main__":
     unittest.main()
